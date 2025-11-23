@@ -5,6 +5,7 @@ use crate::{
     backend::Backend,
     dtype::{NativeType, OneValue, ToF32},
     error::{Error, Result},
+    index::TensorIndex,
     layout::Layout,
     shape::ConcreteShape,
     utils::tensor_creation,
@@ -161,6 +162,13 @@ where
     pub fn reshape(&self, shape: &[usize]) -> Result<Self> {
         let shape = ConcreteShape::from_slice(shape)?;
         let layout = self.layout.reshape(shape)?;
+        self.validate_layout_for_storage(&self.storage, &layout)?;
+        Ok(self.with_layout(layout))
+    }
+
+    pub fn i<I: TensorIndex>(&self, index: I) -> Result<Self> {
+        let indexers = index.to_indexers(self.shape())?;
+        let layout = self.layout.perform_indexing(&indexers, D::DTYPE)?;
         self.validate_layout_for_storage(&self.storage, &layout)?;
         Ok(self.with_layout(layout))
     }

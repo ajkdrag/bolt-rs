@@ -51,11 +51,6 @@ impl ConcreteShape {
     }
 
     fn collect_dims(dims: &[usize]) -> Result<ArrayVec<[usize; MAX_RANK]>> {
-        if dims.is_empty() {
-            return Err(Error::invalid_shape(
-                "shape must have at least one dimension",
-            ));
-        }
         if dims.len() > MAX_RANK {
             return Err(Error::invalid_shape(format!(
                 "tensor rank must be <= {MAX_RANK}"
@@ -138,18 +133,10 @@ pub fn broadcast_shapes(lhs: &[usize], rhs: &[usize]) -> Result<Vec<usize>> {
         }
     }
     shape.reverse();
-    if shape.is_empty() {
-        return Err(Error::invalid_shape(
-            "broadcast result cannot be scalar-less",
-        ));
-    }
     Ok(shape)
 }
 
 pub fn canonical_axes(axes: &[usize], rank: usize) -> Result<Vec<usize>> {
-    if rank == 0 {
-        return Err(Error::invalid_shape("tensor rank must be > 0"));
-    }
     if axes.is_empty() {
         return Ok((0..rank).collect());
     }
@@ -172,14 +159,11 @@ pub fn canonical_axes(axes: &[usize], rank: usize) -> Result<Vec<usize>> {
 
 pub fn reduced_shape(shape: &[usize], axes: &[usize]) -> Result<Vec<usize>> {
     let canonical = canonical_axes(axes, shape.len())?;
-    let mut result = Vec::with_capacity(shape.len().saturating_sub(canonical.len()).max(1));
+    let mut result = Vec::with_capacity(shape.len().saturating_sub(canonical.len()));
     for (idx, dim) in shape.iter().enumerate() {
         if canonical.binary_search(&idx).is_err() {
             result.push(*dim);
         }
-    }
-    if result.is_empty() {
-        result.push(1);
     }
     Ok(result)
 }
