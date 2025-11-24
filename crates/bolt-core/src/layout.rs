@@ -1,7 +1,7 @@
 use crate::{
     dtype::DType,
     error::{Error, Result},
-    shape::{ConcreteShape, MAX_RANK},
+    shape::{broadcast_shapes, ConcreteShape, MAX_RANK},
 };
 use tinyvec::ArrayVec;
 
@@ -254,6 +254,53 @@ impl Layout {
         Ok(Layout::contiguous_with_offset(new_shape, self.offset_bytes))
     }
 
+    pub fn broadcast_to(&self, new_shape: &ConcreteShape) -> Result<Self> {
+        let mut new_strides = ArrayVec::<[isize; MAX_RANK]>::new();
+        let mut shape_iter = self.shape().iter().rev();
+        let mut strides_iter = self.strides().iter().rev();
+        for &dim in new_shape.as_slice().iter().rev() {
+            let (shape_dim, stride) = match (shape_iter.next(), strides_iter.next()) {
+                (Some(&d), Some(&s)) => (d, s),
+                (None, None) => (1, 0),
+                _ => unreachable!(),
+            };
+            if shape_dim == dim {
+                new_strides.push(stride);
+            } else if shape_dim == 1 {
+                new_strides.push(0);
+            } else {
+                return Err(Error::ShapeMismatch {
+                    lhs: self.shape().to_vec(),
+                    rhs: new_shape.as_slice().to_vec(),
+                });
+            }
+        }
+        new_strides.reverse();
+        Self::with_strides(new_shape.clone(), new_strides.as_slice(), self.offset_bytes)
+    }
+
+    pub fn broadcast_binary(lhs: &Layout, rhs: &Layout) -> Result<(Layout, Layout)> {
+        let new_shape = broadcast_shapes(lhs.shape(), rhs.shape())?;
+        let new_shape = ConcreteShape::from_slice(&new_shape)?;
+        let lhs = lhs.broadcast_to(&new_shape)?;
+        let rhs = rhs.broadcast_to(&new_shape)?;
+        Ok((lhs, rhs))
+    }
+
+    pub fn iter_offsets(&self, dtype: DType) -> Box<dyn Iterator<Item = usize> + '_> {
+        if self.is_contiguous() {
+            let elem_size = dtype.size_in_bytes();
+            Box::new((0..self.num_elements()).map(move |i| self.offset_bytes + i * elem_size))
+        } else {
+            Box::new(general_iter_offsets(
+                self.shape().to_vec(),
+                self.strides().to_vec(),
+                self.offset_bytes,
+                dtype.size_in_bytes(),
+            ))
+        }
+    }
+
     pub fn offset_elements(&self, dtype: DType) -> isize {
         (self.offset_bytes / dtype.size_in_bytes()) as isize
     }
@@ -352,4 +399,103 @@ fn compute_kind(shape: &[usize], strides: &[isize]) -> LayoutKind {
         expected *= *dim as isize;
     }
     LayoutKind::Contiguous
+}
+
+fn general_iter_offsets(
+    shape: Vec<usize>,
+    strides: Vec<isize>,
+    offset_bytes: usize,
+    elem_size: usize,
+) -> impl Iterator<Item = usize> {
+    let mut current_indices = vec![0; shape.len()];
+    let mut current_offset = offset_bytes;
+    let num_elements: usize = shape.iter().product();
+    let mut finished = num_elements == 0;
+
+    std::iter::from_fn(move || {
+        if finished {
+            return None;
+        }
+
+        let offset = current_offset;
+
+        for i in (0..shape.len()).rev() {
+            current_indices[i] += 1;
+            if current_indices[i] < shape[i] {
+                current_offset = (current_offset as isize + strides[i] * elem_size as isize) as usize;
+                return Some(offset);
+            }
+            current_indices[i] = 0;
+            let num_strides = (shape[i] - 1) as isize;
+            current_offset = (current_offset as isize - num_strides * strides[i] * elem_size as isize) as usize;
+        }
+        finished = true;
+        Some(offset)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_broadcast_to_scalar() {
+        let shape = ConcreteShape::from_slice(&[]).unwrap();
+        let layout = Layout::contiguous(shape);
+        let new_shape = ConcreteShape::from_slice(&[2, 3]).unwrap();
+        let new_layout = layout.broadcast_to(&new_shape).unwrap();
+        assert_eq!(new_layout.shape(), &[2, 3]);
+        assert_eq!(new_layout.strides(), &[0, 0]);
+    }
+
+    #[test]
+    fn test_broadcast_to_vector() {
+        let shape = ConcreteShape::from_slice(&[3]).unwrap();
+        let layout = Layout::contiguous(shape);
+        let new_shape = ConcreteShape::from_slice(&[2, 3]).unwrap();
+        let new_layout = layout.broadcast_to(&new_shape).unwrap();
+        assert_eq!(new_layout.shape(), &[2, 3]);
+        assert_eq!(new_layout.strides(), &[0, 1]);
+    }
+
+    #[test]
+    fn test_broadcast_to_matrix() {
+        let shape = ConcreteShape::from_slice(&[2, 1]).unwrap();
+        let layout = Layout::contiguous(shape);
+        let new_shape = ConcreteShape::from_slice(&[2, 3]).unwrap();
+        let new_layout = layout.broadcast_to(&new_shape).unwrap();
+        assert_eq!(new_layout.shape(), &[2, 3]);
+        assert_eq!(new_layout.strides(), &[1, 0]);
+    }
+
+    #[test]
+    fn test_broadcast_binary() {
+        let shape1 = ConcreteShape::from_slice(&[2, 1]).unwrap();
+        let layout1 = Layout::contiguous(shape1);
+        let shape2 = ConcreteShape::from_slice(&[3]).unwrap();
+        let layout2 = Layout::contiguous(shape2);
+        let (new_layout1, new_layout2) = Layout::broadcast_binary(&layout1, &layout2).unwrap();
+        assert_eq!(new_layout1.shape(), &[2, 3]);
+        assert_eq!(new_layout1.strides(), &[1, 0]);
+        assert_eq!(new_layout2.shape(), &[2, 3]);
+        assert_eq!(new_layout2.strides(), &[0, 1]);
+    }
+
+    #[test]
+    fn test_iter_offsets_contiguous() {
+        let shape = ConcreteShape::from_slice(&[2, 3]).unwrap();
+        let layout = Layout::contiguous(shape);
+        let offsets: Vec<usize> = layout.iter_offsets(DType::F32).collect();
+        assert_eq!(offsets, vec![0, 4, 8, 12, 16, 20]);
+    }
+
+    #[test]
+    fn test_iter_offsets_broadcasted() {
+        let shape = ConcreteShape::from_slice(&[2, 1]).unwrap();
+        let layout = Layout::contiguous(shape);
+        let new_shape = ConcreteShape::from_slice(&[2, 3]).unwrap();
+        let new_layout = layout.broadcast_to(&new_shape).unwrap();
+        let offsets: Vec<usize> = new_layout.iter_offsets(DType::F32).collect();
+        assert_eq!(offsets, vec![0, 0, 0, 4, 4, 4]);
+    }
 }
