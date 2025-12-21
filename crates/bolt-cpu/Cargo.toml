@@ -2,14 +2,7 @@
 name = "bolt-cpu"
 version.workspace = true
 edition.workspace = true
-authors.workspace = true
-license.workspace = true
 
 [dependencies]
 bolt-core = { path = "../bolt-core" }
-rand = "0.8"
-rand_distr = "0.4"
 
-[features]
-default = ["diagnostics"]
-diagnostics = []

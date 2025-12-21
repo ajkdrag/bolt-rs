@@ -2,13 +2,6 @@
 name = "bolt-data"
 version.workspace = true
 edition.workspace = true
-authors.workspace = true
-license.workspace = true
-description = "Stream-based IDX data loading for bolt (v2 prototype)"
 
 [dependencies]
-bolt-core = { path = "../bolt-core" }
-thiserror.workspace = true
-rand = "0.8"
 
-[dev-dependencies]

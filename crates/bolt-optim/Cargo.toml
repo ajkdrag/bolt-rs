@@ -2,14 +2,8 @@
 name = "bolt-optim"
 version.workspace = true
 edition.workspace = true
-authors.workspace = true
-license.workspace = true
 
 [dependencies]
 bolt-core = { path = "../bolt-core" }
-bolt-autodiff = { path = "../bolt-autodiff" }
-thiserror.workspace = true
+bolt-nn = { path = "../bolt-nn" }
 
-[dev-dependencies]
-bolt-cpu = { path = "../bolt-cpu" }
-bolt-losses = { path = "../bolt-losses" }

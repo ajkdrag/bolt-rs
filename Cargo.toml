@@ -7,10 +7,7 @@ members = [
     "crates/bolt-datasets",
     "crates/bolt-examples",
     "crates/bolt-nn",
-    "crates/bolt-profiler",
     "crates/bolt-optim",
-    "crates/bolt-losses",
-    "crates/bolt-vision",
 ]
 resolver = "2"
 

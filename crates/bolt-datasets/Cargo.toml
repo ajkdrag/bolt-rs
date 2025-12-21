@@ -2,14 +2,7 @@
 name = "bolt-datasets"
 version.workspace = true
 edition.workspace = true
-authors.workspace = true
-license.workspace = true
-description = "Popular datasets for bolt (MNIST, etc.)"
 
 [dependencies]
-bolt-core = { path = "../bolt-core" }
-bolt-data = { path = "../bolt-data" }
-bolt-vision = { path = "../bolt-vision" }
 thiserror.workspace = true
-reqwest = { version = "0.12", features = ["blocking"] }
-flate2 = "1.0"
+

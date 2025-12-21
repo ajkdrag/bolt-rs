@@ -2,18 +2,12 @@
 name = "bolt-examples"
 version.workspace = true
 edition.workspace = true
-authors.workspace = true
-license.workspace = true
 
 [dependencies]
-bolt-core = { path = "../bolt-core" }
-bolt-cpu = { path = "../bolt-cpu" }
 bolt-autodiff = { path = "../bolt-autodiff" }
-bolt-profiler = { path = "../bolt-profiler" }
-bolt-nn = { path = "../bolt-nn" }
-bolt-optim = { path = "../bolt-optim" }
+bolt-cpu = { path = "../bolt-cpu" }
 bolt-data = { path = "../bolt-data" }
 bolt-datasets = { path = "../bolt-datasets" }
-bolt-losses = { path = "../bolt-losses" }
-bolt-vision = { path = "../bolt-vision" }
-rand = "0.8"
+bolt-nn = { path = "../bolt-nn" }
+bolt-optim = { path = "../bolt-optim" }
+

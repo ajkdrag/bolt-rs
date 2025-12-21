@@ -1,150 +1,45 @@
-use std::sync::Arc;
+use crate::{Error, Init, Module, Param, Result, Store};
+use bolt_autodiff::Tensor;
+use bolt_core::Backend;
 
-use bolt_autodiff::Float;
-use bolt_autodiff::HasParams;
-use bolt_autodiff::Parameter;
-use bolt_core::BaseBackend;
-use bolt_core::Tensor;
-use bolt_core::backend::FillOp;
-use bolt_core::backend::RandomOp;
-use serde::Deserialize;
-use serde::Serialize;
-
-use crate::compute::{Compute, ComputeOps};
-use crate::context::Context;
-use crate::error::Result;
-use crate::mode::Mode;
-use crate::model::Model;
-use crate::run_mode::Trainable;
-
-use crate::init::{FanMode, Init, Nonlinearity};
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct LinearSpec {
-    pub in_features: usize,
-    pub out_features: usize,
-    pub bias: bool,
-    pub weight_init: Init,
-    pub bias_init: Init,
+pub struct Linear<B: Backend> {
+    w: Param<B>,
+    b: Option<Param<B>>,
+    in_f: usize,
 }
 
-impl LinearSpec {
-    pub fn new(in_features: usize, out_features: usize) -> Self {
-        Self {
-            in_features,
-            out_features,
-            bias: true,
-            weight_init: Init::KaimingUniform {
-                a: (5.0f32).sqrt(),
-                mode: FanMode::FanIn,
-                nonlinearity: Nonlinearity::LeakyReLU,
-            },
-            bias_init: Init::Zeros,
-        }
-    }
-
-    pub fn bias(mut self, bias: bool) -> Self {
-        self.bias = bias;
-        self
-    }
-
-    pub fn with_weight_init(mut self, init: Init) -> Self {
-        self.weight_init = init;
-        self
-    }
-
-    pub fn with_bias_init(mut self, init: Init) -> Self {
-        self.bias_init = init;
-        self
-    }
-
-    pub fn build<B, D>(&self, backend: &Arc<B>) -> Result<Linear<B, D>>
-    where
-        B: BaseBackend + FillOp<D> + RandomOp<D>,
-        D: Float,
-    {
-        let weight_tensor = self
-            .weight_init
-            .init(backend, &[self.out_features, self.in_features])?;
-
-        let weight = Parameter::with_name(weight_tensor, "weight");
-
-        let bias = if self.bias {
-            let bias_tensor = self.bias_init.init(backend, &[self.out_features])?;
-            Some(Parameter::with_name(bias_tensor, "bias"))
+impl<B: Backend> Linear<B> {
+    pub fn init(store: &Store<B>, in_f: usize, out_f: usize, bias: bool) -> Result<Self> {
+        let w = store.param("weight", &[in_f, out_f], Init::KaimingUniform { a: 0.0 })?;
+        let b = if bias {
+            Some(store.group(1).param("bias", &[out_f], Init::Zeros)?)
         } else {
             None
         };
-
-        Ok(Linear { weight, bias })
+        Ok(Self { w, b, in_f })
     }
 }
 
-pub struct Linear<B, D>
-where
-    B: BaseBackend,
-    D: Float,
-{
-    pub weight: Parameter<B, D>,
-    pub bias: Option<Parameter<B, D>>,
-}
+impl<B: Backend> Module<B> for Linear<B> {
+    type Input = Tensor<B>;
+    type Output = Tensor<B>;
 
-impl<B, D> Trainable for Linear<B, D>
-where
-    B: BaseBackend,
-    D: Float,
-{
-}
-
-impl<B, D> HasParams<B, D> for Linear<B, D>
-where
-    B: BaseBackend,
-    D: Float,
-{
-    fn visit_params<'a>(&'a self, f: &mut dyn FnMut(&'a Parameter<B, D>)) {
-        f(&self.weight);
-        if let Some(ref b) = self.bias {
-            f(b);
+    fn forward(&self, x: Self::Input, _train: bool) -> Result<Self::Output> {
+        let s = x.shape();
+        if s.len() != 2 || s[1] != self.in_f {
+            return Err(Error::Shape(format!(
+                "Linear: expected [batch, {}], got {s:?}",
+                self.in_f
+            )));
         }
+
+        let y = x
+            .matmul(&self.w.tensor())
+            .map_err(|e| Error::Shape(e.to_string()))?;
+        let y = match &self.b {
+            None => y,
+            Some(b) => y.add(&b.tensor()).map_err(|e| Error::Shape(e.to_string()))?,
+        };
+        Ok(y)
     }
-
-    fn visit_params_mut<'a>(&'a mut self, f: &mut dyn FnMut(&'a mut Parameter<B, D>)) {
-        f(&mut self.weight);
-        if let Some(ref mut b) = self.bias {
-            f(b);
-        }
-    }
-
-    fn param_count(&self) -> usize {
-        1 + self.bias.is_some() as usize
-    }
-}
-
-impl<B, D, M> Model<B, D, M> for Linear<B, D>
-where
-    B: Compute<D>,
-    D: Float,
-    M: Mode<B, D>,
-    M::Backend: ComputeOps<D>,
-{
-    type Input = Tensor<M::Backend, D>;
-    type Output = Result<Tensor<M::Backend, D>>;
-
-    fn forward(&self, ctx: &Context<B, D, M>, input: Self::Input) -> Self::Output {
-        let weight = ctx.param(&self.weight);
-        let weight_t = weight.transpose(-1, -2)?;
-        let out = input.matmul(&weight_t)?;
-
-        match &self.bias {
-            Some(bias) => {
-                let bias_tensor = ctx.param(bias);
-                Ok(out.add(&bias_tensor)?)
-            }
-            None => Ok(out),
-        }
-    }
-}
-
-pub fn linear(in_features: usize, out_features: usize) -> LinearSpec {
-    LinearSpec::new(in_features, out_features)
 }

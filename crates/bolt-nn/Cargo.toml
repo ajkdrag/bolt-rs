@@ -2,20 +2,13 @@
 name = "bolt-nn"
 version.workspace = true
 edition.workspace = true
-authors.workspace = true
-license.workspace = true
-
-[features]
-default = ["losses"]
-losses = ["bolt-losses"]
 
 [dependencies]
-bolt-core = { path = "../bolt-core" }
 bolt-autodiff = { path = "../bolt-autodiff" }
-bolt-losses = { path = "../bolt-losses", optional = true }
+bolt-core = { path = "../bolt-core" }
+serde.workspace = true
 thiserror.workspace = true
-serde = { version = "1", features = ["derive"] }
-tinyvec = { version = "1", features = ["alloc"] }
 
 [dev-dependencies]
 bolt-cpu = { path = "../bolt-cpu" }
+bincode.workspace = true

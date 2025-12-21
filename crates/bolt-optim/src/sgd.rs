@@ -1,320 +1,76 @@
-use std::collections::HashMap;
-use std::collections::HashSet;
+use bolt_core::Backend;
+use bolt_nn::Param;
+use std::collections::BTreeMap;
 
-use bolt_autodiff::Float;
-use bolt_autodiff::HasParams;
-use bolt_autodiff::ParamId;
-use bolt_autodiff::Parameter;
-use bolt_core::BaseBackend;
-use bolt_core::Tensor;
-use bolt_core::backend::AddOp;
-use bolt_core::backend::FillOp;
-use bolt_core::backend::MulOp;
-use bolt_core::backend::SubOp;
-
-use crate::error::Error;
-use crate::error::Result;
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct SgdConfig {
-    pub learning_rate: f64,
-    pub momentum: Option<f64>,
-    pub weight_decay: Option<f64>,
+#[derive(Clone, Copy, Debug)]
+pub struct SgdCfg {
+    pub lr: f32,
+    pub momentum: f32,
+    pub weight_decay: f32,
 }
 
-#[derive(Clone, Debug)]
-pub struct Sgd<B, D>
-where
-    B: BaseBackend,
-    D: Float + std::fmt::Display,
-{
-    pub(crate) config: SgdConfig,
-    pub(crate) state: SgdState<B, D>,
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SgdGroupCfg {
+    pub lr_mult: f32,
+    pub weight_decay: Option<f32>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct SgdBuilder {
-    learning_rate: f64,
-    momentum: Option<f64>,
-    weight_decay: Option<f64>,
+pub struct Sgd<B: Backend> {
+    base: SgdCfg,
+    groups: BTreeMap<u32, SgdGroupCfg>,
+    vel: BTreeMap<String, Vec<f32>>,
+    _b: std::marker::PhantomData<B>,
 }
 
-#[derive(Clone, Debug)]
-pub struct SgdParamState<B, D>
-where
-    B: BaseBackend,
-    D: Float + std::fmt::Display,
-{
-    pub(crate) velocity: Option<Tensor<B, D>>,
-}
-
-#[derive(Clone, Debug)]
-pub struct SgdState<B, D>
-where
-    B: BaseBackend,
-    D: Float + std::fmt::Display,
-{
-    pub(crate) per_param: HashMap<ParamId, SgdParamState<B, D>>,
-    pub(crate) step: u64,
-}
-
-impl SgdBuilder {
-    pub fn new() -> Self {
+impl<B: Backend> Sgd<B> {
+    pub fn new(base: SgdCfg) -> Self {
         Self {
-            learning_rate: 0.01,
-            momentum: None,
-            weight_decay: None,
+            base,
+            groups: BTreeMap::new(),
+            vel: BTreeMap::new(),
+            _b: std::marker::PhantomData,
         }
     }
 
-    pub fn learning_rate(mut self, lr: f64) -> Self {
-        self.learning_rate = lr;
-        self
+    pub fn set_group(&mut self, group_id: u32, cfg: SgdGroupCfg) {
+        self.groups.insert(group_id, cfg);
     }
 
-    pub fn momentum(mut self, m: f64) -> Self {
-        self.momentum = Some(m);
-        self
-    }
+    pub fn step(&mut self, params: &[Param<B>]) {
+        for p in params {
+            let g = match p.grad() {
+                None => continue,
+                Some(v) => v,
+            };
 
-    pub fn weight_decay(mut self, wd: f64) -> Self {
-        self.weight_decay = Some(wd);
-        self
-    }
+            let (lr, wd) = self.cfg_for(p.group());
+            let key = p.key().to_string();
+            let mom = self.base.momentum;
 
-    pub fn init<B, D>(self, params: &[&Parameter<B, D>]) -> Result<Sgd<B, D>>
-    where
-        B: BaseBackend + FillOp<D>,
-        D: Float + std::fmt::Display,
-    {
-        validate_hyperparams(self.learning_rate, self.momentum, self.weight_decay)?;
+            let vbuf = self
+                .vel
+                .entry(key)
+                .or_insert_with(|| vec![0.0; g.len()]);
 
-        let mut per_param = HashMap::new();
-        let mut seen = HashSet::new();
-
-        for param in params {
-            if !seen.insert(param.id()) {
-                continue;
-            }
-
-            let mut state = SgdParamState { velocity: None };
-
-            if self.momentum.is_some() {
-                state.velocity = Some(Tensor::zeros_like(param.tensor())?);
-            }
-
-            per_param.insert(param.id(), state);
-        }
-
-        Ok(Sgd {
-            config: SgdConfig {
-                learning_rate: self.learning_rate,
-                momentum: self.momentum,
-                weight_decay: self.weight_decay,
-            },
-            state: SgdState { per_param, step: 0 },
-        })
-    }
-}
-
-impl<B, D> Sgd<B, D>
-where
-    B: BaseBackend + AddOp<D> + SubOp<D> + MulOp<D> + FillOp<D>,
-    D: Float + std::fmt::Display,
-{
-    pub fn builder() -> SgdBuilder {
-        SgdBuilder::new()
-    }
-
-    pub fn config(&self) -> &SgdConfig {
-        &self.config
-    }
-
-    pub fn state(&self) -> &SgdState<B, D> {
-        &self.state
-    }
-
-    pub fn step(&mut self, params: &mut [&mut Parameter<B, D>]) -> Result<()> {
-        let lr_value = cast_scalar::<D, _>(self.config.learning_rate, |value| {
-            Error::InvalidLearningRate { value }
-        })?;
-        let momentum_value = self
-            .config
-            .momentum
-            .map(|m| cast_scalar::<D, _>(m, |value| Error::InvalidMomentum { value }))
-            .transpose()?;
-        let weight_decay_value = self
-            .config
-            .weight_decay
-            .map(|wd| cast_scalar::<D, _>(wd, |value| Error::InvalidWeightDecay { value }))
-            .transpose()?;
-
-        let mut seen = HashSet::new();
-
-        for param in params.iter_mut() {
-            if !seen.insert(param.id()) {
-                continue;
-            }
-
-            self.update_parameter(param, lr_value, momentum_value, weight_decay_value)?;
-        }
-
-        self.state.step = self.state.step.saturating_add(1);
-        Ok(())
-    }
-
-    pub fn step_on<M>(&mut self, model: &mut M) -> Result<()>
-    where
-        M: HasParams<B, D>,
-    {
-        let lr_value = cast_scalar::<D, _>(self.config.learning_rate, |value| {
-            Error::InvalidLearningRate { value }
-        })?;
-        let momentum_value = self
-            .config
-            .momentum
-            .map(|m| cast_scalar::<D, _>(m, |value| Error::InvalidMomentum { value }))
-            .transpose()?;
-        let weight_decay_value = self
-            .config
-            .weight_decay
-            .map(|wd| cast_scalar::<D, _>(wd, |value| Error::InvalidWeightDecay { value }))
-            .transpose()?;
-
-        let mut seen = HashSet::new();
-        let mut err: Option<Error> = None;
-
-        model.visit_params_mut(&mut |param| {
-            if err.is_some() {
-                return;
-            }
-            if !seen.insert(param.id()) {
-                return;
-            }
-
-            if let Err(e) =
-                self.update_parameter(param, lr_value, momentum_value, weight_decay_value)
-            {
-                err = Some(e);
-            }
-        });
-
-        if let Some(e) = err {
-            return Err(e);
-        }
-
-        self.state.step = self.state.step.saturating_add(1);
-        Ok(())
-    }
-
-    fn update_parameter(
-        &mut self,
-        param: &mut Parameter<B, D>,
-        lr: D,
-        momentum: Option<D>,
-        weight_decay: Option<D>,
-    ) -> Result<()> {
-        let state =
-            self.state
-                .per_param
-                .get_mut(&param.id())
-                .ok_or_else(|| Error::UnknownParameter {
-                    param_id: param.id(),
-                    param_name: param.name().map(|n| n.to_string()),
-                })?;
-
-        let grad = param.grad().ok_or_else(|| Error::MissingGradient {
-            param_id: param.id(),
-            param_name: param.name().map(|n| n.to_string()),
-        })?;
-
-        let grad_shape = grad.shape().to_vec();
-        let param_shape = param.tensor().shape().to_vec();
-        if grad_shape != param_shape {
-            return Err(Error::ShapeMismatch {
-                param_id: param.id(),
-                param_name: param.name().map(|n| n.to_string()),
-                grad_shape,
-                param_shape,
+            let t = p.tensor();
+            t.mutate_data(|w| {
+                for i in 0..w.len() {
+                    let grad = g[i] + wd * w[i];
+                    vbuf[i] = mom * vbuf[i] + grad;
+                    w[i] -= lr * vbuf[i];
+                }
             });
         }
-
-        let mut grad_tensor = grad.clone();
-
-        if let Some(wd) = weight_decay {
-            grad_tensor = Self::apply_weight_decay(param.tensor(), &grad_tensor, wd)?;
-        }
-
-        let update = if let Some(mom) = momentum {
-            Self::apply_momentum(state, param.tensor(), &grad_tensor, mom)?
-        } else {
-            grad_tensor
-        };
-
-        let lr_tensor = scalar_tensor(param.tensor(), lr)?;
-        let scaled_update = update.mul(&lr_tensor)?;
-        let new_value = param.tensor().sub(&scaled_update)?;
-        *param.tensor_mut() = new_value;
-
-        Ok(())
     }
 
-    fn apply_weight_decay(
-        param_tensor: &Tensor<B, D>,
-        grad: &Tensor<B, D>,
-        wd: D,
-    ) -> Result<Tensor<B, D>> {
-        let wd_tensor = scalar_tensor(param_tensor, wd)?;
-        let decay = param_tensor.mul(&wd_tensor)?;
-        Ok(grad.add(&decay)?)
-    }
-
-    fn apply_momentum(
-        state: &mut SgdParamState<B, D>,
-        param_tensor: &Tensor<B, D>,
-        grad: &Tensor<B, D>,
-        momentum: D,
-    ) -> Result<Tensor<B, D>> {
-        let momentum_tensor = scalar_tensor(param_tensor, momentum)?;
-        let velocity = match state.velocity.take() {
-            Some(v) => v,
-            None => Tensor::zeros_like(param_tensor)?,
-        };
-        let updated_velocity = velocity.mul(&momentum_tensor)?.add(grad)?;
-        state.velocity = Some(updated_velocity.clone());
-        Ok(updated_velocity)
+    fn cfg_for(&self, group_id: u32) -> (f32, f32) {
+        let g = self.groups.get(&group_id).copied().unwrap_or(SgdGroupCfg {
+            lr_mult: 1.0,
+            weight_decay: None,
+        });
+        let lr = self.base.lr * g.lr_mult;
+        let wd = g.weight_decay.unwrap_or(self.base.weight_decay);
+        (lr, wd)
     }
 }
 
-fn validate_hyperparams(lr: f64, momentum: Option<f64>, weight_decay: Option<f64>) -> Result<()> {
-    if lr <= 0.0 {
-        return Err(Error::InvalidLearningRate { value: lr });
-    }
-    if let Some(m) = momentum {
-        if m < 0.0 {
-            return Err(Error::InvalidMomentum { value: m });
-        }
-    }
-    if let Some(wd) = weight_decay {
-        if wd < 0.0 {
-            return Err(Error::InvalidWeightDecay { value: wd });
-        }
-    }
-    Ok(())
-}
-
-fn cast_scalar<D, F>(value: f64, _err: F) -> Result<D>
-where
-    D: Float,
-    F: FnOnce(f64) -> Error,
-{
-    Ok(D::from_f64(value))
-}
-
-fn scalar_tensor<B, D>(like: &Tensor<B, D>, value: D) -> Result<Tensor<B, D>>
-where
-    B: BaseBackend,
-    D: Float + std::fmt::Display,
-{
-    Ok(Tensor::from_slice(&like.backend(), &[value], &[])?)
-}

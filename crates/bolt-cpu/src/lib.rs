@@ -1,4 +1,7 @@
-pub mod backend;
-mod utils;
+use bolt_core::Backend;
 
-pub use backend::{CpuBackend, CpuDevice};
+#[derive(Clone, Debug, Default)]
+pub struct Cpu;
+
+impl Backend for Cpu {}
+
